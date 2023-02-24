@@ -956,7 +956,7 @@ public class RelToSqlConverter extends SqlImplementor
     return table.maybeUnwrap(JdbcTable.class)
         .map(JdbcTable::tableName)
         .orElseGet(() ->
-            new SqlIdentifier(table.getQualifiedName(), SqlParserPos.ZERO));
+            new SqlIdentifier(table.getQualifiedName(), POS));
   }
 
   /** Visits a TableModify; called by {@link #dispatch} via reflection. */

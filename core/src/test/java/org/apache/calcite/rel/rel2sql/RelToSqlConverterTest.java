@@ -41,8 +41,14 @@ import org.apache.calcite.rel.type.RelDataTypeSystem;
 import org.apache.calcite.rel.type.RelDataTypeSystemImpl;
 import org.apache.calcite.runtime.FlatLists;
 import org.apache.calcite.runtime.Hook;
+import org.apache.calcite.schema.Table;
 import org.apache.calcite.schema.SchemaPlus;
+import org.apache.calcite.schema.impl.AbstractSchema;
+import org.apache.calcite.schema.impl.AbstractTable;
+import org.apache.calcite.jdbc.CalciteSchema;
+
 import org.apache.calcite.sql.SqlCall;
+
 import org.apache.calcite.sql.SqlDialect;
 import org.apache.calcite.sql.SqlDialect.DatabaseProduct;
 import org.apache.calcite.sql.SqlNode;
@@ -79,6 +85,7 @@ import org.apache.calcite.tools.RelBuilder;
 import org.apache.calcite.tools.RuleSet;
 import org.apache.calcite.tools.RuleSets;
 import org.apache.calcite.util.ImmutableBitSet;
+import org.apache.calcite.util.Pair;
 import org.apache.calcite.util.TestUtil;
 import org.apache.calcite.util.Util;
 
@@ -6288,6 +6295,21 @@ class RelToSqlConverterTest {
     // in which "isHavingAlias" is true.
     sql(sql)
         .schema(CalciteAssert.SchemaSpec.JDBC_SCOTT)
+        .withBigQuery().ok(expected);
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-....">[CALCITE-....]
+   * ...</a>. */
+  @Test void testTableScanQuoted() {
+    final String sql = ""
+        + "SELECT \"s\".\"1\".\"a\"\n"
+        + "FROM \"s\".\"1\"";
+
+    final String expected = sql;
+
+    sql(sql)
+        .schema(CalciteAssert.SchemaSpec.SCHEMA_WITH_NUMBER)
         .withBigQuery().ok(expected);
   }
 

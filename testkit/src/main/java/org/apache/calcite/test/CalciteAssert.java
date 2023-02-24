@@ -19,6 +19,7 @@ package org.apache.calcite.test;
 import org.apache.calcite.DataContext;
 import org.apache.calcite.adapter.clone.CloneSchema;
 import org.apache.calcite.adapter.java.ReflectiveSchema;
+import org.apache.calcite.adapter.java.JavaTypeFactory;
 import org.apache.calcite.adapter.jdbc.JdbcSchema;
 import org.apache.calcite.avatica.ConnectionProperty;
 import org.apache.calcite.avatica.util.DateTimeUtils;
@@ -30,6 +31,7 @@ import org.apache.calcite.jdbc.CalciteConnection;
 import org.apache.calcite.jdbc.CalciteMetaImpl;
 import org.apache.calcite.jdbc.CalcitePrepare;
 import org.apache.calcite.jdbc.CalciteSchema;
+import org.apache.calcite.jdbc.JavaTypeFactoryImpl;
 import org.apache.calcite.linq4j.tree.Expression;
 import org.apache.calcite.materialize.Lattice;
 import org.apache.calcite.model.ModelHandler;
@@ -87,6 +89,7 @@ import org.apache.calcite.util.TestUtil;
 import org.apache.calcite.util.Util;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableMultiset;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
@@ -810,6 +813,32 @@ public class CalciteAssert {
           new OrdersHistoryTable(
               OrdersStreamTableFactory.getRowList()));
       return scott;
+
+    case SCHEMA_WITH_NUMBER:
+      CalciteSchema schemaWithNumers = CalciteSchema.createRootSchema(false);
+      JavaTypeFactory typeFactory = new JavaTypeFactoryImpl();
+      schemaWithNumers.add("s", 
+        new AbstractSchema() {
+          @Override protected Map<String, Table> getTableMap() {
+            return ImmutableMap.of(
+              "1",
+              new AbstractTable() {
+                @Override public RelDataType getRowType(RelDataTypeFactory typeFactory) {
+                  RelDataType bool = typeFactory.createSqlType(SqlTypeName.BOOLEAN);
+                  RelDataType dataType = typeFactory.createStructType(
+                    ImmutableList.of(
+                      Pair.of("a", bool),
+                      Pair.of("b", bool)
+                    )
+                  );
+                  return typeFactory.copyType(dataType);
+                }
+              }
+            );
+          }
+        }
+      );
+      return schemaWithNumers.plus();
 
     case TPCH:
       return rootSchema.add(schema.schemaName,
@@ -1950,7 +1979,8 @@ public class CalciteAssert {
     POST("POST"),
     ORINOCO("ORINOCO"),
     AUX("AUX"),
-    BOOKSTORE("bookstore");
+    BOOKSTORE("bookstore"),
+    SCHEMA_WITH_NUMBER("schema_with_number");
 
     /** The name of the schema that is usually created from this specification.
      * (Names are not unique, and you can use another name if you wish.) */
