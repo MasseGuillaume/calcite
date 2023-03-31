@@ -446,4 +446,5 @@ parser: {
   includeAdditionalDeclarations: false
   includeParsingStringLiteralAsArrayLiteral: false
   includeArrayConstructor: true
+  includeMapConstructor: true
 }
