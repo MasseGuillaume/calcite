@@ -1850,6 +1850,40 @@ public class SqlOperatorTest {
   @Test void testRow() {
     final SqlOperatorFixture f = fixture();
     f.setFor(SqlStdOperatorTable.ROW, VM_FENNEL);
+    f.check(
+      "select row(row(1))", 
+      "RecordType(RecordType(INTEGER NOT NULL EXPR$0) NOT NULL EXPR$0) NOT NULL",
+      ""
+    );
+    f.check(
+      "select row(row(1, 2), row(3, 4))",
+      "RecordType(" +
+        "RecordType(INTEGER NOT NULL EXPR$0, INTEGER NOT NULL EXPR$1) NOT NULL EXPR$0, " +
+        "RecordType(INTEGER NOT NULL EXPR$0, INTEGER NOT NULL EXPR$1) NOT NULL EXPR$1" +
+      ") NOT NULL",
+      ""
+    );
+    f.check(
+      "select array[row(row(1))]",
+      "RecordType(RecordType(INTEGER NOT NULL EXPR$0) NOT NULL EXPR$0) NOT NULL ARRAY NOT NULL",
+      ""
+    );
+    f.check(
+      "select array[row(row(1, 2), row(3, 4))]",
+      "RecordType(" +
+        "RecordType(INTEGER NOT NULL EXPR$0, INTEGER NOT NULL EXPR$1) NOT NULL EXPR$0, " +
+        "RecordType(INTEGER NOT NULL EXPR$0, INTEGER NOT NULL EXPR$1) NOT NULL EXPR$1" +
+      ") NOT NULL ARRAY NOT NULL",
+      ""
+    );
+    f.check(
+      "select row(row(1, row(2)), row(3), row('a')) t",
+      "RecordType(" + 
+        "RecordType(INTEGER NOT NULL EXPR$0, RecordType(INTEGER NOT NULL EXPR$0) NOT NULL EXPR$1) NOT NULL EXPR$0, "+
+        "RecordType(INTEGER NOT NULL EXPR$0) NOT NULL EXPR$1, RecordType(CHAR(1) NOT NULL EXPR$0) NOT NULL EXPR$2" +
+      ") NOT NULL",
+      ""
+    );
   }
 
   @Test void testAndOperator() {
