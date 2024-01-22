@@ -44,7 +44,7 @@ class RelToSqlConverterStructsTest {
     String expected = "SELECT \"a\", "
         + "ROW(ROW(\"n1\".\"n11\".\"b\"), ROW(\"n1\".\"n12\".\"c\")) AS \"n1\", "
         + "ROW(\"n2\".\"d\") AS \"n2\", "
-        + "\"e\"\n"
+        + "\"xs\", \"e\"\n"
         + "FROM \"myDb\".\"myTable\"";
     sql(query).ok(expected);
   }
@@ -68,5 +68,39 @@ class RelToSqlConverterStructsTest {
         + "\"n2\".\"d\"\n"
         + "FROM \"myDb\".\"myTable\"";
     sql(query).ok(expected);
+  }
+
+  @Test void testUncollectLateralJoin() {
+    final String query = "select \"a\",\n"
+        + "\"x\"\n"
+        + "from \"myDb\".\"myTable\",\n"
+        + "unnest(\"xs\") as \"x\"";
+
+    /*
+    query logical plan:
+
+    LogicalProject(a=[$0], x=[$6])
+      LogicalCorrelate(correlation=[$cor0], joinType=[inner], requiredColumns=[{4}])
+        LogicalProject(a=[$0], b=[$1.n11.b], c=[$1.n12.c], d=[$2.d], xs=[$3], e=[$4])
+          LogicalTableScan(table=[[myDb, myTable]])
+        Uncollect
+          LogicalProject(xs=[$cor0.xs])
+            LogicalValues(tuples=[[{ 0 }]])
+
+    obtained:
+
+    SELECT 
+      "$cor0"."a", 
+      "$cor0"."xs0" AS "x"
+    FROM (
+      SELECT "a", "n1"."n11"."b", "n1"."n12"."c", "n2"."d", "xs", "e" FROM "myDb"."myTable"
+    ) AS "$cor0",
+    LATERAL UNNEST (
+      SELECT "$cor0"."xs" FROM (VALUES (0)) AS "t" ("ZERO")
+    ) AS "t1" ("xs") AS "t10"
+    */
+
+    final String expected = "SELECT 1";
+    sql(query).schema(CalciteAssert.SchemaSpec.MY_DB).ok(expected);
   }
 }
