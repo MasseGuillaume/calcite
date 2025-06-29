@@ -6548,6 +6548,19 @@ public class SqlParserTest {
     assertThat(sqlNodeVisited.getKind(), is(SqlKind.INSERT));
   }
 
+  @Test void testVisitSqlUpdateWithSqlShuttle() {
+    final String sql = "UPDATE emps SET sal = 0;";
+    final SqlNode sqlNode = sql(sql).node();
+    final SqlNode sqlNodeVisited = sqlNode.accept(new SqlShuttle() {
+      @Override public SqlNode visit(SqlIdentifier identifier) {
+        // Copy the identifier in order to return a new SqlUpdate.
+        return identifier.clone(identifier.getParserPosition());
+      }
+    });
+    assertNotSame(sqlNodeVisited, sqlNode);
+    assertThat(sqlNodeVisited.getKind(), is(SqlKind.UPDATE));
+  }
+
   @Test void testSqlInsertSqlBasicCallToString() {
     final String sql0 = "insert into emps select * from emps";
     final SqlNode sqlNode0 = sql(sql0).node();

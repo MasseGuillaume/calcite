@@ -38,6 +38,22 @@ public class SqlUpdate extends SqlCall {
   public static final SqlSpecialOperator OPERATOR =
       new SqlSpecialOperator("UPDATE", SqlKind.UPDATE);
 
+  public static final SqlSpecialOperator OPERATOR =
+      new SqlSpecialOperator("UPDATE", SqlKind.UPDATE) {
+        @SuppressWarnings("argument.type.incompatible")
+        @Override public SqlCall createCall(@Nullable SqlLiteral functionQualifier,
+            SqlParserPos pos,
+            @Nullable SqlNode... operands) {
+          return new SqlUpdate(
+              pos,
+              (SqlNodeList) operands[0],
+              (SqlNodeList) operands[1],
+              operands[2],
+              (SqlSelect) operands[3],
+              (SqlIdentifier) operands[4]);
+        }
+      };
+
   SqlNode targetTable;
   SqlNodeList targetColumnList;
   SqlNodeList sourceExpressionList;
