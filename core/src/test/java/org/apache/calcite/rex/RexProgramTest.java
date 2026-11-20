@@ -1931,6 +1931,61 @@ class RexProgramTest extends RexProgramTestBase {
     assertThat(sarg.isComplementedPoints(), is(true));
   }
 
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-3178">[CALCITE-3178]
+   * RexSimplify.simplifyOrTerms has quadratic complexity</a>. Each operand of
+   * the OR is simplified using the negations of the operands before it; with
+   * 50,000 operands, a quadratic algorithm takes minutes. */
+  @Test void testSimplifyVeryLargeOrOfEqualities() {
+    final int n = 50_000;
+    final List<RexNode> terms = new ArrayList<>();
+    for (int i = 0; i < n; i++) {
+      terms.add(eq(vIntNotNull(), literal(i)));
+    }
+    final RexNode simplified =
+        simplify.withParanoid(false).simplifyPreservingType(or(terms));
+    assertThat(simplified.getKind(), is(SqlKind.SEARCH));
+    final Sarg<?> sarg =
+        ((RexLiteral) ((RexCall) simplified).getOperands().get(1))
+            .getValueAs(Sarg.class);
+    assertThat(sarg.pointCount, is(n));
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-3178">[CALCITE-3178]
+   * RexSimplify.simplifyOrTerms has quadratic complexity</a>. The operands
+   * of the OR reference several columns, and repeat. */
+  @Test void testSimplifyVeryLargeOrOnSeveralColumns() {
+    final int n = 50_000;
+    final List<RexNode> terms = new ArrayList<>();
+    for (int i = 0; i < n; i++) {
+      final RexNode ref = vIntNotNull(i % 3);
+      terms.add(i % 2 == 0 ? eq(ref, literal(i % 1000)) : gt(ref, literal(i)));
+    }
+    final RexNode simplified =
+        simplify.withParanoid(false).simplifyPreservingType(or(terms));
+    assertThat(simplified,
+        hasToString("OR(SEARCH(?0.notNullInt0, Sarg[0, 2, (3..+\u221e)]), "
+            + "SEARCH(?0.notNullInt1, Sarg[0, (1..+\u221e)]), "
+            + "SEARCH(?0.notNullInt2, Sarg[0, 2, 4, (5..+\u221e)]))"));
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-3178">[CALCITE-3178]
+   * RexSimplify.simplifyOrTerms has quadratic complexity</a>. Each operand
+   * of an OR is simplified using the negations of the operands before it. */
+  @Test void testSimplifyOrTermsUsingPrecedingTerms() {
+    // The second "x = 1" is false given "x <> 1"
+    checkSimplify(
+        or(eq(vIntNotNull(), literal(1)), vBool(), eq(vIntNotNull(), literal(1))),
+        "OR(=(?0.notNullInt0, 1), ?0.bool0)");
+    // "x < 20" is true given "x <= 10" and "x > 3"
+    checkSimplify(
+        or(gt(vIntNotNull(), literal(10)), le(vIntNotNull(), literal(3)),
+            lt(vIntNotNull(), literal(20))),
+        "true");
+  }
+
   /** Unit test for
    * <a href="https://issues.apache.org/jira/browse/CALCITE-7032">[CALCITE-7032]
    * Simplify 'NULL > ALL (ARRAY[1,2,NULL])' to 'NULL'</a>. */

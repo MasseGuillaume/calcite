@@ -85,6 +85,14 @@ public class RexSimplify {
   private final boolean paranoid;
   public final RexBuilder rexBuilder;
   private final RelOptPredicateList predicates;
+  /** Predicates implied by the preceding operands of an OR, in addition to
+   * {@link #predicates}; null if there are none. Only the first
+   * {@link #orPredicateCount} of them hold for this simplifier. */
+  private final @Nullable OrPredicates orPredicates;
+  private final int orPredicateCount;
+  /** Union of {@link #predicates} and {@link #orPredicates}, built lazily by
+   * {@link #allPredicates()}. */
+  private @Nullable RelOptPredicateList allPredicates;
   /** How to treat UNKNOWN values, if one of the deprecated {@code
    * simplify} methods without an {@code unknownAs} argument is called. */
   final RexUnknownAs defaultUnknownAs;
@@ -112,8 +120,18 @@ public class RexSimplify {
   private RexSimplify(RexBuilder rexBuilder, RelOptPredicateList predicates,
       RexUnknownAs defaultUnknownAs, boolean predicateElimination,
       boolean paranoid, RexExecutor executor) {
+    this(rexBuilder, predicates, null, 0, defaultUnknownAs,
+        predicateElimination, paranoid, executor);
+  }
+
+  private RexSimplify(RexBuilder rexBuilder, RelOptPredicateList predicates,
+      @Nullable OrPredicates orPredicates, int orPredicateCount,
+      RexUnknownAs defaultUnknownAs, boolean predicateElimination,
+      boolean paranoid, RexExecutor executor) {
     this.rexBuilder = requireNonNull(rexBuilder, "rexBuilder");
     this.predicates = requireNonNull(predicates, "predicates");
+    this.orPredicates = orPredicates;
+    this.orPredicateCount = orPredicateCount;
     this.defaultUnknownAs = requireNonNull(defaultUnknownAs, "defaultUnknownAs");
     this.predicateElimination = predicateElimination;
     this.paranoid = paranoid;
@@ -146,14 +164,15 @@ public class RexSimplify {
     final RexUnknownAs defaultUnknownAs = RexUnknownAs.falseIf(unknownAsFalse);
     return defaultUnknownAs == this.defaultUnknownAs
         ? this
-        : new RexSimplify(rexBuilder, predicates, defaultUnknownAs,
-            predicateElimination, paranoid, executor);
+        : new RexSimplify(rexBuilder, predicates, orPredicates,
+            orPredicateCount, defaultUnknownAs, predicateElimination, paranoid,
+            executor);
   }
 
   /** Returns a RexSimplify the same as this but with a specified
    * {@link #predicates} value. */
   public RexSimplify withPredicates(RelOptPredicateList predicates) {
-    return predicates == this.predicates
+    return predicates == this.predicates && orPredicates == null
         ? this
         : new RexSimplify(rexBuilder, predicates, defaultUnknownAs,
             predicateElimination, paranoid, executor);
@@ -167,8 +186,9 @@ public class RexSimplify {
   public RexSimplify withParanoid(boolean paranoid) {
     return paranoid == this.paranoid
         ? this
-        : new RexSimplify(rexBuilder, predicates, defaultUnknownAs,
-            predicateElimination, paranoid, executor);
+        : new RexSimplify(rexBuilder, predicates, orPredicates,
+            orPredicateCount, defaultUnknownAs, predicateElimination, paranoid,
+            executor);
   }
 
   /** Returns a RexSimplify the same as this but with a specified
@@ -180,8 +200,9 @@ public class RexSimplify {
   private RexSimplify withPredicateElimination(boolean predicateElimination) {
     return predicateElimination == this.predicateElimination
         ? this
-        : new RexSimplify(rexBuilder, predicates, defaultUnknownAs,
-            predicateElimination, paranoid, executor);
+        : new RexSimplify(rexBuilder, predicates, orPredicates,
+            orPredicateCount, defaultUnknownAs, predicateElimination, paranoid,
+            executor);
   }
 
   /** Simplifies a boolean expression, always preserving its type and its
@@ -369,7 +390,7 @@ public class RexSimplify {
         ? rexBuilder.makeLiteral(false)
         : e.getKind() == SqlKind.NOT
         ? isNotTrue(((RexCall) e).operands.get(0))
-        : predicates.isEffectivelyNotNull(e)
+        : isEffectivelyNotNull(e)
         ? e // would "CAST(e AS BOOLEAN NOT NULL)" better?
         : rexBuilder.makeCall(RexUtil.getPos(e), SqlStdOperatorTable.IS_NOT_FALSE, e);
   }
@@ -382,7 +403,7 @@ public class RexSimplify {
         ? rexBuilder.makeLiteral(true)
         : e.getKind() == SqlKind.NOT
         ? isNotFalse(((RexCall) e).operands.get(0))
-        : predicates.isEffectivelyNotNull(e)
+        : isEffectivelyNotNull(e)
         ? not(e)
         : rexBuilder.makeCall(RexUtil.getPos(e), SqlStdOperatorTable.IS_NOT_TRUE, e);
   }
@@ -395,7 +416,7 @@ public class RexSimplify {
         ? rexBuilder.makeLiteral(false)
         : e.getKind() == SqlKind.NOT
         ? isFalse(((RexCall) e).operands.get(0))
-        : predicates.isEffectivelyNotNull(e)
+        : isEffectivelyNotNull(e)
         ? e // would "CAST(e AS BOOLEAN NOT NULL)" better?
         : rexBuilder.makeCall(RexUtil.getPos(e), SqlStdOperatorTable.IS_TRUE, e);
   }
@@ -408,7 +429,7 @@ public class RexSimplify {
         ? rexBuilder.makeLiteral(true)
         : e.getKind() == SqlKind.NOT
         ? isTrue(((RexCall) e).operands.get(0))
-        : predicates.isEffectivelyNotNull(e)
+        : isEffectivelyNotNull(e)
         ? not(e)
         : rexBuilder.makeCall(RexUtil.getPos(e), SqlStdOperatorTable.IS_FALSE, e);
   }
@@ -934,7 +955,7 @@ public class RexSimplify {
       }
       terms.set(i, simplify.simplify(t, unknownAs));
       RelOptPredicateList newPredicates =
-          simplify.predicates.union(rexBuilder,
+          simplify.allPredicates().union(rexBuilder,
               RelOptPredicateList.of(rexBuilder, terms.subList(i, i + 1)));
       simplify = simplify.withPredicates(newPredicates);
     }
@@ -959,6 +980,13 @@ public class RexSimplify {
     // that 'term' is false. Effectively, we sort terms: visiting
     // 'allowedAsPredicate' terms in the first loop, and
     // non-'allowedAsPredicate' in the second. Each term is visited once.
+    //
+    // Rather than building a new predicate list for each term, which would
+    // take time linear in the number of preceding terms, we append each
+    // inverse to an index that the simplifier can query in logarithmic time.
+    // The simplifier for each term sees only the inverses of the terms before
+    // it.
+    @Nullable OrPredicates orPredicates = null;
     final BitSet doneTerms = new BitSet();
     for (int i = 0; i < terms.size(); i++) {
       final RexNode t = terms.get(i);
@@ -970,10 +998,14 @@ public class RexSimplify {
       terms.set(i, t2);
       final RexNode inverse =
           simplify.simplify(isNotTrue(t2), RexUnknownAs.UNKNOWN);
-      final RelOptPredicateList newPredicates =
-          simplify.predicates.union(rexBuilder,
-              RelOptPredicateList.of(rexBuilder, ImmutableList.of(inverse)));
-      simplify = simplify.withPredicates(newPredicates);
+      if (orPredicates == null) {
+        orPredicates = new OrPredicates(rexBuilder, allPredicates());
+      }
+      final int orPredicateCount = orPredicates.add(inverse);
+      simplify =
+          new RexSimplify(rexBuilder, orPredicates.base, orPredicates,
+              orPredicateCount, defaultUnknownAs, predicateElimination,
+              paranoid, executor);
     }
     for (int i = 0; i < terms.size(); i++) {
       final RexNode t = terms.get(i);
@@ -990,7 +1022,7 @@ public class RexSimplify {
    */
   private boolean allowedAsPredicateDuringOrSimplification(final RexNode t) {
     Predicate predicate = Predicate.of(t);
-    return predicate != null && predicate.allowedInOr(predicates);
+    return predicate != null && predicate.allowedInOr(this);
   }
 
   private RexNode simplifyNot(RexCall call, RexUnknownAs unknownAs) {
@@ -1140,7 +1172,12 @@ public class RexSimplify {
       return null;
     }
 
-    for (RexNode p : predicates.pulledUpPredicates) {
+    if (orPredicates != null && orPredicates.isCurrent(orPredicateCount)) {
+      return orPredicates.isOperands(kind).contains(a)
+          ? rexBuilder.makeLiteral(true)
+          : null;
+    }
+    for (RexNode p : allPredicates().pulledUpPredicates) {
       IsPredicate pred = IsPredicate.of(p);
       if (pred == null || !a.equals(pred.ref)) {
         continue;
@@ -1174,7 +1211,7 @@ public class RexSimplify {
 
     case IS_TRUE:
       // x IS TRUE ==> x (if x is not nullable)
-      if (predicates.isEffectivelyNotNull(a)) {
+      if (isEffectivelyNotNull(a)) {
         return simplify(a, unknownAs);
       }
       simplified = simplify(a, RexUnknownAs.FALSE);
@@ -1185,7 +1222,7 @@ public class RexSimplify {
 
     case IS_NOT_FALSE:
       // x IS NOT FALSE ==> x (if x is not nullable)
-      if (predicates.isEffectivelyNotNull(a)) {
+      if (isEffectivelyNotNull(a)) {
         return simplify(a, unknownAs);
       }
       simplified = simplify(a, RexUnknownAs.TRUE);
@@ -1198,7 +1235,7 @@ public class RexSimplify {
     case IS_NOT_TRUE:
       // x IS NOT TRUE ==> NOT x (if x is not nullable)
       // x IS FALSE ==> NOT x (if x is not nullable)
-      if (predicates.isEffectivelyNotNull(a)) {
+      if (isEffectivelyNotNull(a)) {
         return simplify(not(a), unknownAs);
       }
       break;
@@ -1246,7 +1283,7 @@ public class RexSimplify {
       // even if we cannot do anything else
       simplifiedResult = rexBuilder.makeCall(pos, SqlStdOperatorTable.IS_NOT_NULL, a);
     }
-    if (predicates.pulledUpPredicates.contains(a)) {
+    if (containsPredicate(a)) {
       return rexBuilder.makeLiteral(true);
     }
     if (hasCustomNullabilityRules(a.getKind())) {
@@ -1994,7 +2031,7 @@ public class RexSimplify {
     final Set<RexNode> notNullOperands = new LinkedHashSet<>();
 
     // Add the predicates from the source to the range terms.
-    for (RexNode predicate : predicates.pulledUpPredicates) {
+    for (RexNode predicate : allPredicates().pulledUpPredicates) {
       final Comparison comparison = Comparison.of(predicate);
       if (comparison != null
           && comparison.kind != SqlKind.NOT_EQUALS) { // not supported yet
@@ -2236,7 +2273,7 @@ public class RexSimplify {
 
   private <C extends Comparable<C>> RexNode simplifyUsingPredicates(RexNode e,
       Class<C> clazz, RexUnknownAs unknownAs) {
-    if (predicates.pulledUpPredicates.isEmpty()) {
+    if (predicates.pulledUpPredicates.isEmpty() && orPredicateCount == 0) {
       return e;
     }
 
@@ -2252,16 +2289,8 @@ public class RexSimplify {
       return e;
     }
     final RangeSet<C> rangeSet = rangeSet(comparison.kind, v0);
-    final RangeSet<C> rangeSet2 =
-        residue(comparison.ref, rangeSet, predicates.pulledUpPredicates,
-            clazz);
-    if (rangeSet2.isEmpty()) {
-      // Term is impossible to satisfy given these predicates
-      return rexBuilder.makeLiteral(false);
-    } else if (rangeSet2.equals(rangeSet)) {
-      // no change
-      return e;
-    } else if (rangeSet2.equals(RangeSets.rangeSetAll())) {
+    final RangeIndex<C> rangeIndex = rangeIndex(comparison.ref, clazz);
+    if (rangeIndex.implies(rangeSet)) {
       // Range is always satisfied given these predicates; but nullability might
       // be problematic
       if (unknownAs != UNKNOWN) {
@@ -2274,12 +2303,22 @@ public class RexSimplify {
       return simplify(
           rexBuilder.makeCall(RexUtil.getPos(e), SqlStdOperatorTable.IS_NOT_NULL, comparison.ref),
           RexUnknownAs.UNKNOWN);
-    } else if (rangeSet2.asRanges().size() == 1
-        && Iterables.getOnlyElement(rangeSet2.asRanges()).hasLowerBound()
-        && Iterables.getOnlyElement(rangeSet2.asRanges()).hasUpperBound()
-        && Iterables.getOnlyElement(rangeSet2.asRanges()).lowerEndpoint()
-        .equals(Iterables.getOnlyElement(rangeSet2.asRanges()).upperEndpoint())) {
-      final Range<C> r = Iterables.getOnlyElement(rangeSet2.asRanges());
+    }
+    // The term is weakened to "rangeSet" intersected with the predicates.
+    // Look at no more than two ranges of the intersection, so that the cost
+    // does not depend on the number of predicates.
+    final List<Range<C>> ranges = rangeIndex.intersect(rangeSet, 2);
+    if (ranges.isEmpty()) {
+      // Term is impossible to satisfy given these predicates
+      return rexBuilder.makeLiteral(false);
+    } else if (rangeIndex.enclosesAll(rangeSet)) {
+      // no change
+      return e;
+    } else if (ranges.size() == 1
+        && ranges.get(0).hasLowerBound()
+        && ranges.get(0).hasUpperBound()
+        && ranges.get(0).lowerEndpoint().equals(ranges.get(0).upperEndpoint())) {
+      final Range<C> r = ranges.get(0);
       // range is now a point; it's worth simplifying
       return rexBuilder.makeCall(RexUtil.getPos(e), SqlStdOperatorTable.EQUALS, comparison.ref,
           rexBuilder.makeLiteral(r.lowerEndpoint(),
@@ -2290,73 +2329,61 @@ public class RexSimplify {
     }
   }
 
-  /** Weakens a term so that it checks only what is not implied by predicates.
+  /** Returns the ranges of {@code ref} that the predicates allow.
    *
-   * <p>The term is broken into "ref comparison constant",
-   * for example "$0 &lt; 5".
-   *
-   * <p>Examples:
+   * <p>Examples, writing the predicates in brackets:
    * <ul>
-   *
-   * <li>{@code residue($0 < 10, [$0 < 5])} returns {@code true}
-   *
-   * <li>{@code residue($0 < 10, [$0 < 20, $0 > 0])} returns {@code $0 < 10}
+   * <li>{@code $0 < 10} is implied by {@code [$0 < 5]}
+   * <li>{@code $0 < 10} is narrowed to {@code $0 > 0 AND $0 < 10}
+   *     by {@code [$0 < 20, $0 > 0]}
    * </ul>
    */
-  private static <C extends Comparable<C>> RangeSet<C> residue(RexNode ref,
-      RangeSet<C> r0, List<RexNode> predicates, Class<C> clazz) {
-    // Narrow a single mutable range set in place. Copying the range set for
-    // every predicate is quadratic per call, and cubic over a large OR or AND,
-    // because simplifyOrTerms and simplifyAndTerms pass one predicate per
-    // preceding term.
-    final TreeRangeSet<C> result = TreeRangeSet.create(r0);
-    for (RexNode predicate : predicates) {
-      switch (predicate.getKind()) {
-      case EQUALS:
-      case NOT_EQUALS:
-      case LESS_THAN:
-      case LESS_THAN_OR_EQUAL:
-      case GREATER_THAN:
-      case GREATER_THAN_OR_EQUAL:
-        final RexCall call = (RexCall) predicate;
-        final Comparison comparison = Comparison.of(call);
-        if (comparison != null && comparison.ref.equals(ref)) {
-          final C c1 = comparison.literal.getValueAs(clazz);
-          if (c1 == null) {
-            throw new AssertionError("value must not be null in "
-                + comparison.literal);
-          }
-          switch (predicate.getKind()) {
-          case NOT_EQUALS:
-            // We want to intersect result with the range set of everything but
-            // c1. We subtract the point c1 from result, which is equivalent.
-            final Range<C> pointRange = range(SqlKind.EQUALS, c1);
-            final RangeSet<C> notEqualsRangeSet =
-                ImmutableRangeSet.of(pointRange).complement();
-            if (result.enclosesAll(notEqualsRangeSet)) {
-              return RangeSets.rangeSetAll();
-            }
-            result.remove(pointRange);
-            break;
-          default:
-            final Range<C> r1 = range(comparison.kind, c1);
-            if (result.encloses(r1)) {
-              // Given these predicates, term is always satisfied.
-              // e.g. r0 is "$0 < 10", r1 is "$0 < 5"
-              return RangeSets.rangeSetAll();
-            }
-            result.removeAll(ImmutableRangeSet.of(r1).complement());
-          }
-          if (result.isEmpty()) {
-            return ImmutableRangeSet.of(); // short-cut
-          }
-        }
-        break;
-      default:
-        break;
+  private <C extends Comparable<C>> RangeIndex<C> rangeIndex(RexNode ref,
+      Class<C> clazz) {
+    if (orPredicates != null && orPredicates.isCurrent(orPredicateCount)) {
+      return orPredicates.rangeIndex(ref, clazz);
+    }
+    final RangeIndex<C> rangeIndex = new RangeIndex<>();
+    for (RexNode predicate : allPredicates().pulledUpPredicates) {
+      final Comparison comparison = Comparison.of(predicate);
+      if (comparison != null && comparison.ref.equals(ref)) {
+        rangeIndex.add(comparison, clazz);
       }
     }
-    return ImmutableRangeSet.copyOf(result);
+    return rangeIndex;
+  }
+
+  /** Returns all predicates known to hold: {@link #predicates} plus those
+   * implied by the preceding operands of an OR. */
+  private RelOptPredicateList allPredicates() {
+    if (orPredicates == null) {
+      return predicates;
+    }
+    RelOptPredicateList allPredicates = this.allPredicates;
+    if (allPredicates == null) {
+      allPredicates = orPredicates.toList(orPredicateCount);
+      this.allPredicates = allPredicates;
+    }
+    return allPredicates;
+  }
+
+  /** Returns whether an expression is effectively NOT NULL given the
+   * predicates.
+   *
+   * @see RelOptPredicateList#isEffectivelyNotNull(RexNode) */
+  private boolean isEffectivelyNotNull(RexNode e) {
+    if (orPredicates != null && orPredicates.isCurrent(orPredicateCount)) {
+      return orPredicates.isEffectivelyNotNull(e);
+    }
+    return allPredicates().isEffectivelyNotNull(e);
+  }
+
+  /** Returns whether a predicate is known to hold. */
+  private boolean containsPredicate(RexNode e) {
+    if (orPredicates != null && orPredicates.isCurrent(orPredicateCount)) {
+      return orPredicates.contains(e);
+    }
+    return allPredicates().pulledUpPredicates.contains(e);
   }
 
   /** Simplifies OR(x, x) into x, and similar.
@@ -2573,6 +2600,7 @@ public class RexSimplify {
       throw new AssertionError("always false [" + before
           + "] simplified to always true [" + simplified  + "]");
     }
+    final RelOptPredicateList predicates = allPredicates();
     final RexAnalyzer foo0 = new RexAnalyzer(before, predicates);
     final RexAnalyzer foo1 = new RexAnalyzer(simplified, predicates);
     if (foo0.unsupportedCount > 0 || foo1.unsupportedCount > 0) {
@@ -3283,6 +3311,202 @@ public class RexSimplify {
     }
   }
 
+  /** The values of an expression that a list of comparison predicates on it
+   * allow.
+   *
+   * <p>A term "ref IN r0" is implied by the predicates if some predicate that
+   * is at least as strong as all of the predicates before it lies within r0.
+   * Such "tight" predicates are nested, so it is enough to remember the last
+   * one. This gives the same answer as visiting the predicates in order,
+   * narrowing r0 by each, and stopping as soon as the narrowed range encloses
+   * the next predicate.
+   *
+   * <p>Adding a predicate, and testing a term, each take time logarithmic in
+   * the number of predicates.
+   *
+   * @param <C> Value type */
+  private static final class RangeIndex<C extends Comparable<C>> {
+    /** Intersection of the ranges of all predicates. */
+    private final RangeSet<C> intersection =
+        TreeRangeSet.create(ImmutableList.of(Range.all()));
+    /** The last predicate that was enclosed by the intersection of the
+     * predicates before it; null if there are no predicates. */
+    private @Nullable RangeSet<C> lastTight;
+
+    void add(Comparison comparison, Class<C> clazz) {
+      final C c = comparison.literal.getValueAs(clazz);
+      if (c == null) {
+        return; // ignoring a predicate is safe
+      }
+      final RangeSet<C> r = rangeSet(comparison.kind, c);
+      if (intersection.enclosesAll(r)) {
+        lastTight = r;
+      }
+      if (comparison.kind == SqlKind.NOT_EQUALS) {
+        intersection.remove(range(SqlKind.EQUALS, c));
+      } else {
+        intersection.removeAll(r.complement());
+      }
+    }
+
+    /** Returns whether every value that the predicates allow is in
+     * {@code rangeSet}. */
+    boolean implies(RangeSet<C> rangeSet) {
+      final RangeSet<C> lastTight = this.lastTight;
+      return lastTight != null && rangeSet.enclosesAll(lastTight);
+    }
+
+    /** Returns whether the predicates allow every value in
+     * {@code rangeSet}. */
+    boolean enclosesAll(RangeSet<C> rangeSet) {
+      return intersection.enclosesAll(rangeSet);
+    }
+
+    /** Returns the first {@code limit} ranges of the intersection of
+     * {@code rangeSet} with the values that the predicates allow. */
+    List<Range<C>> intersect(RangeSet<C> rangeSet, int limit) {
+      final List<Range<C>> list = new ArrayList<>();
+      for (Range<C> range : rangeSet.asRanges()) {
+        for (Range<C> r : intersection.subRangeSet(range).asRanges()) {
+          if (list.size() >= limit) {
+            return list;
+          }
+          list.add(r);
+        }
+      }
+      return list;
+    }
+  }
+
+  /** Predicates that grow as {@link #simplifyOrTerms} visits the operands of
+   * an OR, indexed so that each question that {@link RexSimplify} asks about
+   * them takes constant or logarithmic time.
+   *
+   * <p>Each {@link RexSimplify} that uses this object sees a prefix of the
+   * added predicates, and may use the indexes only while that prefix is
+   * all of them. */
+  private static final class OrPredicates {
+    private final RexBuilder rexBuilder;
+    final RelOptPredicateList base;
+    private final List<RexNode> added = new ArrayList<>();
+    private final Set<RexNode> all = new HashSet<>();
+    private final Set<RexNode> nullOperands = new HashSet<>();
+    private final Set<RexNode> notNullOperands = new HashSet<>();
+    /** Comparisons, keyed by their left operand. */
+    private final Map<RexNode, List<Comparison>> comparisons = new HashMap<>();
+    /** Range indexes keyed by expression and value type, each with the
+     * number of comparisons it has consumed. */
+    private final Map<Pair<RexNode, Class<?>>, Pair<RangeIndex<?>, int[]>>
+        rangeIndexes = new HashMap<>();
+
+    OrPredicates(RexBuilder rexBuilder, RelOptPredicateList base) {
+      this.rexBuilder = rexBuilder;
+      this.base = base;
+      base.pulledUpPredicates.forEach(this::index);
+    }
+
+    /** Adds a predicate, and returns the number of added predicates. */
+    int add(RexNode predicate) {
+      added.add(predicate);
+      index(predicate);
+      return added.size();
+    }
+
+    private void index(RexNode predicate) {
+      all.add(predicate);
+      switch (predicate.getKind()) {
+      case IS_NULL:
+        nullOperands.add(((RexCall) predicate).getOperands().get(0));
+        break;
+      case IS_NOT_NULL:
+        notNullOperands.add(((RexCall) predicate).getOperands().get(0));
+        break;
+      default:
+        final Comparison comparison = Comparison.of(predicate);
+        if (comparison != null) {
+          comparisons.computeIfAbsent(comparison.ref, k -> new ArrayList<>())
+              .add(comparison);
+        }
+      }
+    }
+
+    /** Returns whether a simplifier that sees the first {@code count} added
+     * predicates may use the indexes. */
+    boolean isCurrent(int count) {
+      return count == added.size();
+    }
+
+    /** Returns the base predicates plus the first {@code count} added
+     * predicates. */
+    RelOptPredicateList toList(int count) {
+      return base.union(rexBuilder,
+          RelOptPredicateList.of(rexBuilder, added.subList(0, count)));
+    }
+
+    boolean contains(RexNode predicate) {
+      return all.contains(predicate);
+    }
+
+    /** Returns the operands of the predicates of a given kind,
+     * {@code IS_NULL} or {@code IS_NOT_NULL}. */
+    Set<RexNode> isOperands(SqlKind kind) {
+      switch (kind) {
+      case IS_NULL:
+        return nullOperands;
+      case IS_NOT_NULL:
+        return notNullOperands;
+      default:
+        return ImmutableSet.of();
+      }
+    }
+
+    /** Equivalent to
+     * {@link RelOptPredicateList#isEffectivelyNotNull(RexNode)}. */
+    boolean isEffectivelyNotNull(RexNode e) {
+      if (!e.getType().isNullable()) {
+        return true;
+      }
+      if (!notNullOperands.isEmpty()) {
+        if (notNullOperands.contains(e)) {
+          return true;
+        }
+        // if e IS NOT NULL and e is TINYINT then cast(e as INTEGER) IS NOT NULL
+        if (RexUtil.isLosslessCast(e)
+            && isEffectivelyNotNull(((RexCall) e).getOperands().get(0))) {
+          return true;
+        }
+      }
+      if (SqlKind.COMPARISON.contains(e.getKind())) {
+        for (RexNode operand : ((RexCall) e).getOperands()) {
+          if (!isEffectivelyNotNull(operand)) {
+            return false;
+          }
+        }
+        return true;
+      }
+      return false;
+    }
+
+    /** Returns the values of {@code ref} that the predicates allow. */
+    @SuppressWarnings("unchecked")
+    <C extends Comparable<C>> RangeIndex<C> rangeIndex(RexNode ref,
+        Class<C> clazz) {
+      final Pair<RangeIndex<?>, int[]> pair =
+          rangeIndexes.computeIfAbsent(Pair.of(ref, clazz),
+              k -> Pair.of(new RangeIndex<C>(), new int[1]));
+      final RangeIndex<C> rangeIndex = (RangeIndex<C>) pair.left;
+      final List<Comparison> list = comparisons.get(ref);
+      if (list != null) {
+        // Catch up with comparisons added since this index was last used
+        final int[] consumed = pair.right;
+        while (consumed[0] < list.size()) {
+          rangeIndex.add(list.get(consumed[0]++), clazz);
+        }
+      }
+      return rangeIndex;
+    }
+  }
+
   /** Marker interface for predicates (expressions that evaluate to BOOLEAN). */
   private interface Predicate {
     /** Wraps an expression in a Predicate or returns null. */
@@ -3296,7 +3520,7 @@ public class RexSimplify {
 
     /** Returns whether this predicate can be used while simplifying other OR
      * operands. */
-    default boolean allowedInOr(RelOptPredicateList predicates) {
+    default boolean allowedInOr(RexSimplify simplify) {
       return true;
     }
   }
@@ -3440,14 +3664,14 @@ public class RexSimplify {
       return null;
     }
 
-    @Override public boolean allowedInOr(RelOptPredicateList predicates) {
+    @Override public boolean allowedInOr(RexSimplify simplify) {
       // if ref is not a 'loss-less' cast then can't be allowed to be used
       // while simplifying other OR operands
       if (ref.isA(SqlKind.CAST) && !RexUtil.isLosslessCast(ref)) {
         return false;
       }
       return !ref.getType().isNullable()
-          || predicates.isEffectivelyNotNull(ref);
+          || simplify.isEffectivelyNotNull(ref);
     }
   }
 
